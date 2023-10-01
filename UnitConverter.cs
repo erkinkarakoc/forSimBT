@@ -1,85 +1,96 @@
-using System;
-using System.Collections.Generic;
 
-public class UnitConverter
+
+public static class UnitConverter
 {
-    private Dictionary<string, Unit> unitTable;
-   
+    private static Unit[] units;
 
-    public UnitConverter()
-    {
-        unitTable = new Dictionary<string, Unit>();
-       
-
-        // Add predefined units
-        AddUnit("meter", "m", "Length", 1.0);
-        AddUnit("foot", "ft", "Length", 0.3048);
-        AddUnit("inch", "in", "Length", 0.0254);
-
-        AddUnit("kilogram", "kg", "Weight", 1.0);
-        AddUnit("pound", "lb", "Weight", 0.45359237);
-        AddUnit("gram", "g", "Weight", 0.001);
-
-        AddUnit("m/s", "m/s", "Speed", 1.0);
-        AddUnit("km/h", "km/h", "Speed", 0.27777778);
-        AddUnit("mph", "mph", "Speed", 0.44704);
-    }
-
-   
-
-    public void AddUnit(string name, string symbol, string dimensionName, double conversionFactor)
+    static UnitConverter()
     {
         
-            if (!unitTable.ContainsKey(name))
-            {
-                unitTable[name] = new Unit(name, symbol, dimensionName, conversionFactor);
-            }
-            else
-            {
-                Console.WriteLine($"Unit '{name}' already exists in the table.");
-            }
-        
-        
-    }
-
-    public string Convert(double value, string fromUnitName, string toUnitName)
-    {
-        if (unitTable.ContainsKey(fromUnitName) && unitTable.ContainsKey(toUnitName))
+        units = new Unit[]
         {
-            var fromUnit = unitTable[fromUnitName];
-            var toUnit = unitTable[toUnitName];
+            new Unit(UnitNameEnums.Meter, "m", "Length", 1.0),
+            new Unit(UnitNameEnums.Foot, "ft", "Length", 0.3048),
+            new Unit(UnitNameEnums.Inch, "in", "Length", 0.0254),
 
-            if (fromUnit.DimensionName == toUnit.DimensionName)
+            new Unit(UnitNameEnums.Kilogram, "kg", "Weight", 1.0),
+            new Unit(UnitNameEnums.Pound, "lb", "Weight", 0.45359237),
+            new Unit(UnitNameEnums.Gram, "g", "Weight", 0.001),
+
+            new Unit(UnitNameEnums.MetersPerSecond, "m/s", "Speed", 1.0),
+            new Unit(UnitNameEnums.KilometersPerHour, "km/h", "Speed", 0.27777778),
+            new Unit(UnitNameEnums.MilesPerHour, "mph", "Speed", 0.44704)
+        };
+    }
+
+    public static string Convert(double value, UnitNameEnums fromUnit, UnitNameEnums toUnit)
+    {
+        Unit from = GetUnit(fromUnit);
+        Unit to = GetUnit(toUnit);
+
+        if (from != null && to != null)
+        {
+            if (from.DimensionName == to.DimensionName)
             {
-                double result = value * (fromUnit.ConversionFactor / toUnit.ConversionFactor);
-                return $"{value} {fromUnit.Symbol} = {result} {toUnit.Symbol}";
+                double result = value * (from.ConversionFactor / to.ConversionFactor);
+                return $"{value} {from.Symbol} = {result} {to.Symbol}";
             }
             else
             {
-                return $"Cannot convert between units of different dimensions: {fromUnit.Name} to {toUnit.Name}.";
+                throw new Exception($"Cannot convert between units of different dimensions: {from.Name} to {to.Name}. {System.Environment.StackTrace}");
+                
             }
         }
         else
         {
-            return "Invalid units specified.";
+            throw new Exception($"Invalid units specified.: {fromUnit} to {toUnit}. {System.Environment.StackTrace}");
+            
+        }
+    }
+    public static void AddUnit(UnitNameEnums name, string symbol, string dimensionName, double conversionFactor)
+    {
+        Unit unit = new Unit(name, symbol, dimensionName, conversionFactor);
+        units.Append(unit);
+    }
+    private static Unit GetUnit(UnitNameEnums name)
+    {
+        foreach (var unit in units)
+        {
+            if (unit.Name == name)
+            {
+                return unit;
+            }
+        }
+        return null;
+    }
+    class Unit
+    {
+        public UnitNameEnums Name { get; }
+        public string Symbol { get; }
+        public double ConversionFactor { get; }
+        public string DimensionName { get; }
+
+        public Unit(UnitNameEnums name, string symbol, string dimensionName, double conversionFactor)
+        {
+            Name = name;
+            Symbol = symbol;
+            ConversionFactor = conversionFactor;
+            DimensionName = dimensionName;
         }
     }
 }
 
-public class Unit
+public enum UnitNameEnums
 {
-    public string Name { get; }
-    public string Symbol { get; }
-    public string DimensionName { get; }
-    public double ConversionFactor { get; }
-
-    public Unit(string name, string symbol, string dimensionName, double conversionFactor)
-    {
-        Name = name;
-        Symbol = symbol;
-        DimensionName = dimensionName;
-        ConversionFactor = conversionFactor;
-    }
+    Meter,
+    Foot,
+    Inch,
+    Kilogram,
+    Pound,
+    Gram,
+    MetersPerSecond,
+    KilometersPerHour,
+    MilesPerHour
 }
 
 
