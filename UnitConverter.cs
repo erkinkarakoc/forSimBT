@@ -1,22 +1,48 @@
-
-
+  public enum UnitSystemEnum
+        {
+            Metric,
+            ImperialFtMi,
+            ImperialYdNmi,
+            ImperialInchMi
+        }
+public enum UnitNameEnums
+{
+    Meter,
+    KiloMeter,
+    Inch,
+    Foot,
+    Yard,
+    Mile,
+    NauticalMile,
+    MetersPerSecond,
+    KilometersPerHour,
+    MilesPerHour,
+    Knot
+}
 public static class UnitConverter
 {
     private static Unit[] units;
+    private static UnitSystemEnum currentUnitSystemEnum;
 
+    public delegate void OnChangeUnitSystem();
+    public static OnChangeUnitSystem UnitSystemOnChanged;
+    
+    public static UnitSystemEnum CurrentUnitSystemEnum{
+        get {return currentUnitSystemEnum;}
+        set {currentUnitSystemEnum = value; UnitSystemOnChanged.Invoke();}
+    }
+    
     static UnitConverter()
     {
         
         units = new Unit[]
         {
-            new Unit(UnitNameEnums.Meter, "m", "Length", 1.0),
-            new Unit(UnitNameEnums.Foot, "ft", "Length", 0.3048),
+            new Unit(UnitNameEnums.Meter, "m", "length", 1.0),
+            new Unit(UnitNameEnums.Meter, "km", "length", 1000.0),
+            new Unit(UnitNameEnums.Inch, "m", "length", 1.0),
+            new Unit(UnitNameEnums.Foot, "ft", "length", 0.3048),
             new Unit(UnitNameEnums.Inch, "in", "Length", 0.0254),
-
-            new Unit(UnitNameEnums.Kilogram, "kg", "Weight", 1.0),
-            new Unit(UnitNameEnums.Pound, "lb", "Weight", 0.45359237),
-            new Unit(UnitNameEnums.Gram, "g", "Weight", 0.001),
-
+            
             new Unit(UnitNameEnums.MetersPerSecond, "m/s", "Speed", 1.0),
             new Unit(UnitNameEnums.KilometersPerHour, "km/h", "Speed", 0.27777778),
             new Unit(UnitNameEnums.MilesPerHour, "mph", "Speed", 0.44704)
@@ -80,17 +106,6 @@ public static class UnitConverter
     }
 }
 
-public enum UnitNameEnums
-{
-    Meter,
-    Foot,
-    Inch,
-    Kilogram,
-    Pound,
-    Gram,
-    MetersPerSecond,
-    KilometersPerHour,
-    MilesPerHour
-}
+
 
 
