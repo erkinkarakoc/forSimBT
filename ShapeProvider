@@ -1,0 +1,353 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+[RequireComponent(typeof(LineRenderer))]
+public class LineRendererDrawer : MonoBehaviour
+{
+    LineRenderer lineRenderer;
+    MeshCollider meshCollider;
+    [SerializeField] Camera cam;
+    [SerializeField] Material mat;
+    [SerializeField] Terrain terrain;
+    [SerializeField] Shapes curShape;
+
+
+    Vector3[] shapeVertices;
+    [SerializeField] int resolution = 20;
+    [SerializeField] float radius = 20f;
+    [SerializeField] float height = 20f;
+    [SerializeField] float width = 10f;
+
+
+    enum Shapes
+    {
+        Ellipse,
+        Triangle,
+        Rectangle,
+        Arrow,
+        CurlyBracket
+    }
+    private void Start()
+    {
+        
+        lineRenderer = GetComponent<LineRenderer>();
+        meshCollider = gameObject.AddComponent<MeshCollider>();
+        SetupLineRenderer();
+        UpdateShape();
+
+       
+    }
+
+    private void Update()
+    {
+        if (Input.GetMouseButtonDown(0))
+        {
+            RaycastHit hit;
+            Ray ray = cam.ScreenPointToRay(Input.mousePosition);
+            if (Physics.Raycast(ray, out hit, 1000))
+            {
+                if (hit.collider.gameObject == terrain.gameObject)
+                {
+                    
+                    List<Collider> cols = new List<Collider>();
+                    cols.AddRange(Physics.OverlapSphere(hit.point, 0.1f));
+                    foreach (var item in cols)
+                    {
+                        if(item.name == "LineRenderer")
+                        {
+                            item.transform.Translate(Vector3.forward, Space.World);
+                        }
+                    }
+                }
+                
+            }
+        }
+        if (Input.GetKey(KeyCode.RightBracket))
+        {
+            UpdateShape();
+        }
+        if (transform.hasChanged)
+        {
+            Vector3[] vector3s = new Vector3[lineRenderer.positionCount];
+            lineRenderer.GetPositions(vector3s);
+            for (int i = 0; i < lineRenderer.positionCount; i++)
+            {
+                vector3s[i].y = terrain.SampleHeight(transform.TransformPoint(vector3s[i]));
+            }
+            lineRenderer.SetPositions(vector3s);
+            UpdateCollider();
+        }
+    }
+    void UpdateShape()
+    {
+        switch (curShape)
+        {
+            case Shapes.Ellipse:
+                SetVerticesForEllipse();
+                break;
+            case Shapes.Triangle:
+                SetVerticesForTriangle();
+                break;
+            case Shapes.Rectangle:
+                SetVerticesForRectangle();
+                break;
+            case Shapes.Arrow:
+                SetVerticesForArrow();
+                break;
+            case Shapes.CurlyBracket:
+                SetVerticesForCurlyBracket();
+                break;
+            default:
+                SetVerticesForCircle();
+                break;
+        }
+        lineRenderer.SetPositions(shapeVertices);
+        UpdateCollider();
+    }
+    void UpdateCollider()
+    {
+        Mesh mesh = new Mesh();
+        lineRenderer.BakeMesh(mesh, true);
+        meshCollider.sharedMesh = mesh;
+        //meshCollider.convex = true;
+        //meshCollider.isTrigger = true;
+    }
+    void SetupLineRenderer()
+    {
+        lineRenderer.loop = true;
+        lineRenderer.startColor = Color.green;
+        lineRenderer.endColor = Color.green;
+        lineRenderer.useWorldSpace = false;
+        lineRenderer.material = mat;
+        lineRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        lineRenderer.receiveShadows = false;
+    }
+    private void SetVerticesForCircle()
+    {
+        shapeVertices = new Vector3[resolution];
+        for (int i = 0; i < resolution; i++)
+        {
+            shapeVertices[i].x = radius * Mathf.Cos(i * 2 * Mathf.PI / resolution);
+
+            shapeVertices[i].z = radius * Mathf.Sin(i * 2 * Mathf.PI / resolution);
+        }
+        lineRenderer.positionCount = resolution;
+    }
+    private void SetVerticesForEllipse()
+    {
+        shapeVertices = new Vector3[resolution];
+        for (int i = 0; i < resolution; i++)
+        {
+            shapeVertices[i].x = width / 2 * Mathf.Cos(i * 2 * Mathf.PI / resolution);
+
+            shapeVertices[i].z = height / 2 * Mathf.Sin(i * 2 * Mathf.PI / resolution);
+        }
+        lineRenderer.positionCount = resolution;
+    }
+    private void SetVerticesForTriangle()
+    {
+        int actualRes = 3 * resolution - 3;
+        shapeVertices = new Vector3[actualRes];
+        // abc triangle a(0,h/2) b(w/2,-h/2) c(-w/2,-h/2)
+        Vector3 a = new Vector3(0, 0, height * 0.5f);
+        Vector3 b = new Vector3(width*0.5f, 0, -height * 0.5f);
+        Vector3 c = new Vector3(-width*0.5f, 0, -height * 0.5f);
+
+        //first a to b 
+        Vector3[] vector3s = GenerateLinePoints(a,b,resolution);
+
+        for (int i = 0; i < resolution; i++)
+        {
+            shapeVertices[i] = vector3s[i];
+        }
+        //then b to c
+        vector3s = GenerateLinePoints(b, c, resolution);
+        for (int i = resolution; i < (2*resolution-1); i++)
+        {
+            shapeVertices[i] = vector3s[i - resolution + 1];
+        }
+        //then c to a 
+        vector3s = GenerateLinePoints(c, a, resolution);
+        for(int i = (2 * resolution - 1); i < actualRes; i++)
+        {
+            shapeVertices[i] = vector3s[i -(2 * resolution - 2)];
+        }
+
+        lineRenderer.positionCount = actualRes;
+    }
+    private void SetVerticesForRectangle()
+    {
+        int actualRes = 4 * resolution - 4;
+        shapeVertices = new Vector3[actualRes];
+        // abcd rectangle a(-w/2,h/2) b(w/2,h/2) c(w/2,-h/2) d(-w/2,-h/2)
+        Vector3 a = new Vector3(-width*0.5f, 0, height * 0.5f);
+        Vector3 b = new Vector3(width * 0.5f, 0, height * 0.5f);
+        Vector3 c = new Vector3(width * 0.5f, 0, -height * 0.5f);
+        Vector3 d = new Vector3(-width * 0.5f, 0, -height * 0.5f);
+
+        //first a to b
+        Vector3[] vector3s = GenerateLinePoints(a, b, resolution);
+
+        for (int i = 0; i < resolution; i++)
+        {
+            shapeVertices[i] = vector3s[i];
+        }
+
+        //then b to c
+        vector3s = GenerateLinePoints(b, c, resolution);
+        for (int i = resolution; i < (2 * resolution - 1); i++)
+        {
+            shapeVertices[i] = vector3s[i - resolution + 1];
+        }
+
+        //then c to d 
+        vector3s = GenerateLinePoints(c, d, resolution);
+        for (int i = (2 * resolution - 1); i < (3*resolution-2); i++)
+        {
+            shapeVertices[i] = vector3s[i - (2 * resolution - 2)];
+        }
+
+        //then d to a 
+        vector3s = GenerateLinePoints(d, a, resolution);
+        for (int i = (3 * resolution - 2); i < actualRes; i++)
+        {
+            shapeVertices[i] = vector3s[i - (3 * resolution - 3)];
+        }
+
+        lineRenderer.positionCount = actualRes;
+    }
+    private void SetVerticesForArrow()
+    {
+        int actualRes = 7 * resolution - 7;
+        shapeVertices = new Vector3[actualRes];
+        
+        Vector3 a = new Vector3(width * 0.5f, 0, 0);
+        Vector3 b = new Vector3(width * 0.3f, 0, height * 0.5f);
+        Vector3 c = new Vector3(width * 0.3f, 0, height * 0.28f);
+        Vector3 d = new Vector3(-width * 0.5f, 0, height * 0.28f);
+        Vector3 e = new Vector3(-width * 0.5f, 0, -height * 0.28f);
+        Vector3 f = new Vector3(width * 0.3f, 0, -height * 0.28f);
+        Vector3 g = new Vector3(width * 0.3f, 0, -height * 0.5f);
+        //first a to b
+        Vector3[] vector3s = GenerateLinePoints(a, b, resolution);
+
+        for (int i = 0; i < resolution; i++)
+        {
+            shapeVertices[i] = vector3s[i];
+        }
+
+        //then b to c
+        vector3s = GenerateLinePoints(b, c, resolution);
+        for (int i = resolution; i < (2 * resolution - 1); i++)
+        {
+            shapeVertices[i] = vector3s[i - resolution + 1];
+        }
+
+        //then c to d 
+        vector3s = GenerateLinePoints(c, d, resolution);
+        for (int i = (2 * resolution - 1); i < (3 * resolution - 2); i++)
+        {
+            shapeVertices[i] = vector3s[i - (2 * resolution - 2)];
+        }
+
+        //then d to e 
+        vector3s = GenerateLinePoints(d, e, resolution);
+        for (int i = (3 * resolution - 2); i < (4 * resolution - 3); i++)
+        {
+            shapeVertices[i] = vector3s[i - (3 * resolution - 3)];
+        }
+
+        //then e to f 
+        vector3s = GenerateLinePoints(e, f, resolution);
+        for (int i = (4 * resolution - 3); i < (5 * resolution - 4); i++)
+        {
+            shapeVertices[i] = vector3s[i - (4 * resolution - 4)];
+        }
+
+        //then f to g 
+        vector3s = GenerateLinePoints(f, g, resolution);
+        for (int i = (5 * resolution - 4); i < (6 * resolution - 5); i++)
+        {
+            shapeVertices[i] = vector3s[i - (5 * resolution - 5)];
+        }
+
+        //then g to a 
+        vector3s = GenerateLinePoints(g, a, resolution);
+        for (int i = (6 * resolution - 5); i < actualRes; i++)
+        {
+            shapeVertices[i] = vector3s[i - (6 * resolution - 6)];
+        }
+
+
+        lineRenderer.positionCount = actualRes;
+    }
+    private void SetVerticesForCurlyBracket()
+    {
+        int actualRes = 2 * resolution -1;
+        shapeVertices = new Vector3[actualRes];
+
+        Vector3 a = new Vector3(0.5f * width, 0, -0.5f * height);
+        Vector3 b = new Vector3(0, 0, 0.5f * height);
+        Vector3 c = new Vector3(-0.5f * width, 0, -0.5f * height);
+        Vector3 d0 = new Vector3(0, 0, -0.5f * height);
+        Vector3 d1 = new Vector3(0.5f * width, 0, height);
+        Vector3 d2 = new Vector3(-0.5f * width, 0, height);
+
+        Vector3[] vector3s = new Vector3[resolution];
+        vector3s = GenerateBezierPoints(a, b, d1, d0, resolution);
+        for (int i = 0; i < resolution; i++)
+        {
+            shapeVertices[i] = vector3s[i];
+        }
+        vector3s = GenerateBezierPoints(b, c, d0, d2, resolution);
+        for (int i = resolution ; i < actualRes; i++)
+        {
+            shapeVertices[i] = vector3s[i - resolution + 1];
+        }
+
+        lineRenderer.positionCount = actualRes;
+    }
+
+
+    private Vector3[] GenerateLinePoints(Vector3 s, Vector3 e, int r)
+    {
+        Vector3[] ps = new Vector3[r];
+        for (int i = 0; i < r; i++)
+        {
+            float t = (float)i / (r - 1);
+            Vector3 p = Vector3.Lerp(s, e, t);
+            ps[i] = (p);
+        }
+        return ps;
+    }
+    private Vector3[] GenerateBezierPoints(Vector3 s, Vector3 e,Vector3 c1,Vector3 c2, int r)
+    {
+        Vector3[] ps = new Vector3[r];
+        float st = 1f / r;
+        float t = 0;
+        for (int i = 0; i < r; i++)
+        {
+            t = st * i;
+            ps[i] = CalculateBezierPoint(t, s, c1, c2, e);
+        }
+
+        return ps;
+    }
+    private Vector3 CalculateBezierPoint(float t, Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3)
+    {
+        float u = 1f - t;
+        float tt = t * t;
+        float uu = u * u;
+        float uuu = uu * u;
+        float ttt = tt * t;
+
+        Vector3 p = uuu * p0; // (1-t)^3 * P0
+        p += 3 * uu * t * p1; // 3(1-t)^2*t * P1
+        p += 3 * u * tt * p2; // 3(1-t)t^2 * P2
+        p += ttt * p3; // t^3 * P3
+
+        return p;
+    }
+
+}
