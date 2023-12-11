@@ -1,0 +1,678 @@
+
+using System.Collections;
+using System.Collections.Generic;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
+using UnityEngine;
+using UnityEngine.UI;
+
+[BurstCompile]
+public class BestObserverPointsFinder : MonoBehaviour
+{
+    [Header("Data Collecting Setup")]
+    [SerializeField, Range(100, 10000000)] int dCBatchSize = 10000;
+
+    [Header("ViewShed Setup")]
+    [SerializeField, Range(1,100)] int minTargetSens = 10;
+    [SerializeField, Range(1,100)] int observerSens =10;
+    [SerializeField, Range(100, 10000000)] int viewshedBatchSize = 10000;
+    [SerializeField, Range(1, 512)] int multiThreadBatchSize = 16;
+    [SerializeField, Range(10, 100000)] float sensorRange = 1000;
+    [SerializeField, Range(0.1f, 10.0f)] float sensorHeight = 1.5f;
+    [SerializeField, Range(0.1f, 10.0f)] float targetHeight = 1.5f;
+
+    [Header("Analyzing Setup")]
+    [SerializeField, Range(100, 10000000)] int analyzeBatchSize = 10000;
+    [SerializeField] float peaksDistanceThresholdStart = 250;
+    [SerializeField] AnimationCurve peaksDistanceThresholdCurve;
+    [SerializeField] float peaksDistanceThresholdEnd = 750;
+    [SerializeField] int resultListSize = 5;
+
+    [Header("For Testing")]
+    [SerializeField] LineRenderer TargetZoneLineRenderer;
+    [SerializeField] LineRenderer ObserverZoneLineRenderer;
+    [SerializeField] GameObject dummyPoint, foundPoint;
+    [SerializeField] Button cancelBtn;
+    [SerializeField] Slider processSlider;
+    [SerializeField] Terrain terrain;
+    [SerializeField] bool debugLasers;
+    
+
+    //Mfor calculation setup
+    Vector3[] observerZonePolygon, targetZonePolygon;
+
+    //Memory for synched multithread viewshedding
+    NativeArray<Vector3> targetPoints; //Persistent
+    NativeArray<Vector3> observerPoints; // Persistent
+    NativeArray<bool> observerPointsVisibilities; // Temp
+    NativeArray<RaycastHit> results; // Temp
+    NativeArray<RaycastCommand> commands; // Temp
+    JobHandle setupHandle, gatherHandle, raycastHandle;
+    int[] observerPointVisScore;
+    int  totalCommand, batchCounter, maxBatchSize;
+    int targetIdx, obsIdx;
+    bool isCalculationPaused, isJobsSet;
+
+    //Mfor state process tracking
+    int currentBatchCounter;
+    int mbatchCount = 0;
+    
+    //MFor Finder State Controller 
+    FinderState state = FinderState.Idle;
+    const float dataCollectingStatePercent = 0.25f;
+    const float viewSheddingStatePercent = 0.75f;
+    
+    // enum for finder state controller
+    enum FinderState { Idle, DataCollecting, Viewshedding, Analyzing, VSPausedIdle, VSEndIdle}
+
+ 
+    #region CalculationStateControlMethods
+  
+    void StartCalculation()
+    {
+        if (state != FinderState.Idle) return;
+        state = FinderState.DataCollecting;
+        UpdateProcessDisplay(0);
+        //Setup observer and target zone polygons 
+        observerZonePolygon = new Vector3[ObserverZoneLineRenderer.positionCount];
+        ObserverZoneLineRenderer.GetPositions(observerZonePolygon);
+        targetZonePolygon = new Vector3[TargetZoneLineRenderer.positionCount];
+        TargetZoneLineRenderer.GetPositions(targetZonePolygon);
+        
+        //Data collecting
+        StartCoroutine(CreateObsAndTargetPoints());
+        
+    }
+    void PauseCalculation()
+    {
+        if (state != FinderState.Viewshedding) return;
+        isCalculationPaused = true;
+        state = FinderState.Analyzing;
+        StartCoroutine(AnalyzeSeq());
+    }
+    void ResumeCalculation()
+    {
+        if (state != FinderState.VSPausedIdle) return;
+        isCalculationPaused = false;
+        state = FinderState.Viewshedding;
+    }
+    void CancelCalculation()
+    {
+        if (state != FinderState.VSPausedIdle) return;
+        isCalculationPaused = false;
+        state = FinderState.Idle;
+        DisposeAll();
+    }
+    void ClearCalculation()
+    {
+        if (state != FinderState.VSEndIdle) return;
+        isCalculationPaused = false;
+        state = FinderState.Idle;
+        DisposeAll();
+    }
+    #endregion
+    #region HiddenTransitionMethods
+    void StartViewShedding()
+    {
+        //Calculation setup
+        batchCounter = 0;
+        totalCommand = observerPoints.Length * targetPoints.Length;
+        maxBatchSize = Mathf.CeilToInt(totalCommand / viewshedBatchSize);
+        //Setup first viewshed batch and set state to viewshed
+        state = FinderState.Viewshedding;
+        LateParallelJobs();
+    }
+
+    #endregion
+    #region DataCollectingMethods
+    IEnumerator CreateObsAndTargetPoints()
+    {
+        currentBatchCounter = 0;
+        Vector2[] observerZone;
+        //Calculating and assigning observer zone polygon
+        float minX, maxX, minZ, maxZ; minX = minZ = float.MaxValue; maxX = maxZ = float.MinValue;
+        observerZone = new Vector2[observerZonePolygon.Length];
+        for (int i = 0; i < observerZonePolygon.Length; i++)
+        {
+            if (observerZonePolygon[i].x < minX) minX = observerZonePolygon[i].x;
+            if (observerZonePolygon[i].x > maxX) maxX = observerZonePolygon[i].x;
+            if (observerZonePolygon[i].z < minZ) minZ = observerZonePolygon[i].z;
+            if (observerZonePolygon[i].z > maxZ) maxZ = observerZonePolygon[i].z;
+            observerZone[i].x = observerZonePolygon[i].x;
+            observerZone[i].y = observerZonePolygon[i].z;
+        }
+
+        //Creating and calculating observer zone grid
+        int gridXNumber = Mathf.Abs(Mathf.CeilToInt((maxX - minX) / observerSens));
+        int gridZNumber = Mathf.Abs(Mathf.CeilToInt((maxZ - minZ) / observerSens));
+        Vector3 gridOrigin = new Vector3(minX, 0, minZ);
+        List<Vector3> ops = new List<Vector3>();
+        for (int i = 0; i < gridXNumber; i++)
+        {
+            for (int j = 0; j < gridZNumber; j++)
+            {
+                Vector2 curVec2 = new Vector2(i * observerSens, j * observerSens);
+                if (IsPointInsideArea(curVec2 + V3toV2(gridOrigin), observerZone))
+                {
+                    Vector3 op = new Vector3();
+                    op.x = curVec2.x;
+                    op.z = curVec2.y;
+                    op += gridOrigin;
+                    op.y = terrain.SampleHeight(op);//todo TerrainManager.Instance.GetElevation(curVec2.x + gridOrigin.x, curVec2.y + gridOrigin.z, 10000, null);
+                    op.y += sensorHeight;
+                    ops.Add(op);
+                }
+                //Batch controller
+                currentBatchCounter++;
+                if (currentBatchCounter > dCBatchSize)
+                {
+                    currentBatchCounter = 0;
+                    UpdateProcessDisplay(0.22f * (j+(i*gridZNumber))/ (gridXNumber*gridZNumber));
+                    yield return null;
+                }
+
+            }
+        }
+
+        observerPoints = new NativeArray<Vector3>(ops.Count, Allocator.Persistent);
+        observerPoints.CopyFrom(ops.ToArray());
+
+        //ObserverVisibilities buffer creating
+        observerPointVisScore = new int[ops.Count];
+
+        List<Vector3> tps = new List<Vector3>();
+        Vector2[] polygon;
+        Vector2 center;
+        float quadSize;
+        //Calculating and assigning target zone polygon
+        polygon = new Vector2[targetZonePolygon.Length];
+        for (int i = 0; i < targetZonePolygon.Length; i++)
+        {
+            polygon[i].x = targetZonePolygon[i].x;
+            polygon[i].y = targetZonePolygon[i].z;
+        }
+        minX = float.MaxValue;
+        minZ = float.MaxValue;
+        maxX = float.MinValue;
+        maxZ = float.MinValue;
+        for (int i = 0; i < polygon.Length; i++)
+        {
+            if (polygon[i].x > maxX) maxX = polygon[i].x;
+            if (polygon[i].x < minX) minX = polygon[i].x;
+            if (polygon[i].y > maxZ) maxZ = polygon[i].y;
+            if (polygon[i].y < minZ) minZ = polygon[i].y;
+        }
+        //Calculating zone center
+        center.x = (maxX + minX) * 0.5f;
+        center.y = (maxZ + minZ) * 0.5f;
+        //Assigning quadSize
+        quadSize = Mathf.Abs(maxX - minX);
+        if (Mathf.Abs(maxZ - minZ) > quadSize) quadSize = Mathf.Abs(maxZ - minZ);
+        //Assigning target points
+        Cell centerCell = new Cell();
+        List<Cell> cells = new List<Cell>();
+        int N = 1;
+        int S = -1;
+        int W = -1;
+        int E = 1;
+        centerCell.center = center;
+        centerCell.level = 2;
+        cells.Add(centerCell);
+        int curLevel = 2;
+        while ((quadSize / Mathf.Pow(2, curLevel)) > minTargetSens)
+        {
+            int y = cells.Count;
+            for (int i = 0; i < y; i++)
+            {
+                AddCell(cells[i], N, W, quadSize, ref polygon, ref cells, ref tps);
+
+            }
+            for (int i = 0; i < y; i++)
+            {
+                AddCell(cells[i], S, E, quadSize, ref polygon, ref cells, ref tps);
+
+            }
+            for (int i = 0; i < y; i++)
+            {
+                AddCell(cells[i], N, E, quadSize, ref polygon, ref cells, ref tps);
+
+            }
+            for (int i = 0; i < y; i++)
+            {
+                AddCell(cells[i], S, W, quadSize, ref polygon, ref cells, ref tps);
+
+            }
+            for (int i = 0; i < y; i++)
+            {
+                cells.RemoveAt(0);
+            }
+            curLevel++;
+
+        }
+
+        for (int i = 0; i < tps.Count; i++)
+        {
+            Vector3 v3 = tps[i];
+            v3.y = terrain.SampleHeight(v3);//todo TerrainManager.Instance.GetElevation(curVec2.x + gridOrigin.x, curVec2.y + gridOrigin.z, 10000, null);
+            v3.y += targetHeight;
+            tps[i] = v3;
+
+            //Batch controller
+            currentBatchCounter++;
+            if (currentBatchCounter > dCBatchSize)
+            {
+                currentBatchCounter = 0;
+                UpdateProcessDisplay(0.22f+(i * 0.03f / (tps.Count)));
+                yield return null;
+            }
+        }
+
+        targetPoints = new NativeArray<Vector3>(tps.Count, Allocator.Persistent);
+        targetPoints.CopyFrom(tps.ToArray());
+        StartViewShedding();
+    }
+  
+    #endregion
+    #region ViewSheddingMethods
+
+    void EarlyParallelJobs()
+    {
+        gatherHandle.Complete();
+
+        for (int i = 0; i < observerPointsVisibilities.Length; i++)
+        {
+            int ti = targetIdx;
+            int oi = obsIdx + i;
+            if (oi >= observerPoints.Length)
+            {
+                ti += oi / observerPoints.Length;
+                oi = oi % observerPoints.Length;
+            }
+            if (observerPointsVisibilities[i])
+            {
+                observerPointVisScore[oi]++;
+                if (debugLasers)//todo for testing
+                    Debug.DrawLine(observerPoints[oi], targetPoints[ti], Color.green, 0.025f);
+            }
+        }
+        DisposeTemps();
+        
+        
+        batchCounter++;
+
+        UpdateProcessDisplay((float)batchCounter / (float)maxBatchSize);
+        isJobsSet = false;
+    }
+    void LateParallelJobs()
+    {
+        if (isCalculationPaused) return;
+        int curSize = totalCommand - (viewshedBatchSize * batchCounter);
+        if (curSize > viewshedBatchSize) curSize = viewshedBatchSize;
+        targetIdx = Mathf.FloorToInt(batchCounter * viewshedBatchSize / observerPoints.Length);
+        obsIdx = batchCounter * viewshedBatchSize % observerPoints.Length;
+
+        observerPointsVisibilities = new NativeArray<bool>(curSize, Allocator.TempJob);
+        commands = new NativeArray<RaycastCommand>(curSize, Allocator.TempJob);
+        results = new NativeArray<RaycastHit>(curSize, Allocator.TempJob);
+
+        RaycastBatchSetupJob setupJob = new RaycastBatchSetupJob();
+        setupJob.commands = commands;
+        setupJob.observerPoints = observerPoints;
+        setupJob.targetPoints = targetPoints;
+        setupJob.targetIdx = targetIdx;
+        setupJob.obsIdx = obsIdx;
+
+        RaycastBatchGatherJob gatherJob = new RaycastBatchGatherJob();
+        gatherJob.results = results;
+        gatherJob.observerPoints = observerPoints;
+        gatherJob.observerPointsVisibilities = observerPointsVisibilities;
+        gatherJob.targetPoints = targetPoints;
+        gatherJob.targetIdx = targetIdx;
+        gatherJob.obsIdx = obsIdx;
+        gatherJob.sensorRange = sensorRange;
+
+
+        setupHandle = setupJob.Schedule(curSize, multiThreadBatchSize);
+        raycastHandle = RaycastCommand.ScheduleBatch(commands, results, multiThreadBatchSize, setupHandle);
+        gatherHandle = gatherJob.Schedule(curSize, multiThreadBatchSize, raycastHandle);
+
+        isJobsSet = true;
+        JobHandle.ScheduleBatchedJobs();
+
+    }
+
+    #endregion
+    #region AnalyzingMethods
+    IEnumerator AnalyzeSeq()
+    {
+        //General method variables
+        float processMaxVal = resultListSize * observerPointVisScore.Length;
+        List<int> peaksIds = new List<int>();
+        List<int> ignoredIds = new List<int>();
+        // Find global maxima
+        int gMax = 0;
+        int gMaxId = 0;
+        for (int i = 0; i < observerPointVisScore.Length; i++)
+        {
+            if (observerPointVisScore[i] > gMax)
+            {
+                gMax = observerPointVisScore[i];
+                gMaxId = i;
+            }
+            mbatchCount++;
+            if (mbatchCount >= analyzeBatchSize)
+            {
+                UpdateProcessDisplay((float)i / processMaxVal);
+                mbatchCount = 0;
+                yield return null;
+
+            }
+
+        }
+        peaksIds.Add(gMaxId);
+        ignoredIds.Add(gMaxId);
+        //Entering loop for fill desired list
+        for (int l = 1; l < resultListSize; l++)
+        {
+            float lMax = 0; int lMaxId = 0;
+            //Entering loop for find next recommended peak
+            for (int i = 0; i < observerPointVisScore.Length; i++)
+            {
+                foreach (var item in ignoredIds)
+                {
+                    if (item == i) goto JumpPoint;
+                }
+                float weightedObsScore = 0;
+                for (int j = 0; j < peaksIds.Count; j++)
+                {
+                    float distance = Vector3.Distance(observerPoints[peaksIds[j]], observerPoints[i]);
+                    if (distance > peaksDistanceThresholdEnd)
+                    {
+                        weightedObsScore += observerPointVisScore[i];
+                    }
+                    else if (distance < peaksDistanceThresholdStart)
+                    {
+                        //weightedObsScore += 0;
+                        ignoredIds.Add(i);
+                        goto JumpPoint;
+                    }
+                    else
+                    {
+                        float distanceRate = (distance - peaksDistanceThresholdStart) / (peaksDistanceThresholdEnd - peaksDistanceThresholdStart);
+                        weightedObsScore += peaksDistanceThresholdCurve.Evaluate(distanceRate) * observerPointVisScore[i];
+                    }
+                }
+                if (weightedObsScore > lMax)
+                {
+                    lMax = weightedObsScore;
+                    lMaxId = i;
+                }
+            JumpPoint:;
+                mbatchCount++;
+                if (mbatchCount >= analyzeBatchSize)
+                {
+                    UpdateProcessDisplay((float)(observerPointVisScore.Length * l + i) / processMaxVal);
+                    mbatchCount = 0;
+                    yield return null;
+
+                }
+
+
+            }
+            UpdateProcessDisplay(1.0f);
+            peaksIds.Add(lMaxId);
+            ignoredIds.Add(lMaxId);
+
+        }
+        foreach (var item in peaksIds)
+        {
+            Instantiate(foundPoint, observerPoints[item] + Vector3.up * 3, Quaternion.identity);
+        }
+        if (isCalculationPaused)
+        {
+            state = FinderState.VSPausedIdle;
+        }
+        else
+        {
+            state = FinderState.VSEndIdle;
+        }
+    }
+    #endregion
+    #region Utilities
+    void AddCell(Cell parent, int northing, int easting, float quadSize, ref Vector2[] polygon, ref List<Cell> cells, ref List<Vector3> points)
+    {
+
+        Cell cell;
+        float size = quadSize / Mathf.Pow(2, parent.level);
+        cell.center = new Vector2(parent.center.x + northing * size, parent.center.y + easting * size);
+        cell.level = parent.level + 1;
+        if (IsPointInsideArea(cell.center, polygon))
+        {
+            cells.Add(cell);
+            points.Add(V2toV3(cell.center));
+        }
+        else
+        {
+            cells.Add(cell);
+        }
+            
+
+
+    }
+    bool IsPointInsideArea(Vector2 testPoint, Vector2[] polygon)
+    {
+        bool result = false;
+        int j = polygon.Length - 1;
+        for (int i = 0; i < polygon.Length; i++)
+        {
+            if (polygon[i].y < testPoint.y && polygon[j].y >= testPoint.y ||
+                polygon[j].y < testPoint.y && polygon[i].y >= testPoint.y)
+            {
+                if (polygon[i].x + (testPoint.y - polygon[i].y) /
+                   (polygon[j].y - polygon[i].y) *
+                   (polygon[j].x - polygon[i].x) < testPoint.x)
+                {
+                    result = !result;
+                }
+            }
+            j = i;
+        }
+        return result;
+    }
+    Vector2 V3toV2(Vector3 v3)
+    {
+        return new Vector2(v3.x, v3.z);
+    }
+    Vector3 V2toV3(Vector2 v2)
+    {
+        return new Vector3(v2.x, 0, v2.y);
+    }
+    void DisposeTemps()
+    {
+        if (observerPointsVisibilities.IsCreated)
+            observerPointsVisibilities.Dispose();
+        if (results.IsCreated)
+            results.Dispose();
+        if (commands.IsCreated)
+            commands.Dispose();
+    }
+    void DisposeAll()
+    {
+        if (results.IsCreated)
+            results.Dispose();
+        if (commands.IsCreated)
+            commands.Dispose();
+        if (observerPoints.IsCreated)
+            observerPoints.Dispose();
+        if (observerPointsVisibilities.IsCreated)
+            observerPointsVisibilities.Dispose();
+        if (targetPoints.IsCreated)
+            targetPoints.Dispose();
+    }
+    #endregion
+    #region UI Methods
+    void UpdateProcessDisplay(float curStatePercent)
+    {
+        //update current state text and process percent slider
+        switch (state)
+        {
+            case FinderState.Idle:
+                processSlider.value = 0;
+                break;
+            case FinderState.DataCollecting:
+                processSlider.value = curStatePercent;
+                break;
+            case FinderState.Viewshedding:
+                processSlider.value = curStatePercent * viewSheddingStatePercent + dataCollectingStatePercent;
+                break;
+            case FinderState.Analyzing:
+                processSlider.value = curStatePercent;
+                break;
+        }
+    }
+    public void CancelBtnClicked()
+    {
+        
+
+    }
+    public void PauseBtnClicked()
+    {
+        if (state == FinderState.Viewshedding) PauseCalculation();
+        else if (state == FinderState.VSPausedIdle) ResumeCalculation();
+    }
+    #endregion
+    #region MonoBehaviour
+    private void Update()
+    {
+        if (isJobsSet)
+        {
+            EarlyParallelJobs();
+        }
+
+        if (Input.GetKeyDown(KeyCode.Space))
+        {
+            if (state==FinderState.Idle)
+            {
+                StartCalculation();
+            }
+
+        }
+    }
+    private void LateUpdate()
+    {
+        if (state == FinderState.Viewshedding && !isJobsSet)
+        {
+            if (batchCounter > maxBatchSize)
+            {//Long calculation end 
+                
+                int maxVis = 0;
+                int maxVisIdx = -1;
+                for (int i = 0; i < observerPointVisScore.Length; i++)
+                {
+                    if (observerPointVisScore[i] > maxVis)
+                    {
+                        maxVis = observerPointVisScore[i];
+                        maxVisIdx = i;
+
+                    }
+                }
+                Debug.DrawLine(observerPoints[maxVisIdx], observerPoints[maxVisIdx] + Vector3.up * 100, Color.red, 25.0f);
+                //todo for testing
+                state = FinderState.Analyzing;
+                StartCoroutine(AnalyzeSeq());
+                
+            }
+            else
+            {//Calculation continues
+                LateParallelJobs();
+            }
+
+        }
+    }
+    private void OnDestroy()
+    {
+        DisposeAll();
+    }
+    #endregion
+
+
+    struct Cell
+    {
+        public Vector2 center;
+        public int level;
+    }
+}
+public struct ObserverPoint
+{
+    public Vector3 worldPos;
+    public int visibilityNumber;
+}
+
+[BurstCompile]
+public struct RaycastBatchSetupJob : IJobParallelFor
+{
+    [ReadOnly]
+    public NativeArray<Vector3> observerPoints;
+    [ReadOnly]
+    public NativeArray<Vector3> targetPoints;
+    [ReadOnly]
+    public int targetIdx,obsIdx;
+    [WriteOnly]
+    public NativeArray<RaycastCommand> commands;
+    
+    
+    
+    public void Execute(int idx)
+    {
+        int ti = targetIdx;
+        int oi = obsIdx + idx;
+        if(oi >= observerPoints.Length)
+        {
+            ti += oi / observerPoints.Length;
+            oi = oi % observerPoints.Length;
+        }
+        Vector3 point = observerPoints[oi];
+        Vector3 vec = point - targetPoints[ti];
+        commands[idx] = new RaycastCommand(targetPoints[ti], vec);
+    }
+}
+[BurstCompile]
+public struct RaycastBatchGatherJob : IJobParallelFor
+{
+    [ReadOnly]
+    public NativeArray<RaycastHit> results;
+    [ReadOnly]
+    public NativeArray<Vector3> observerPoints;
+    [ReadOnly]
+    public NativeArray<Vector3> targetPoints;
+    [WriteOnly]
+    public NativeArray<bool> observerPointsVisibilities;
+    
+    public int targetIdx, obsIdx;
+    public float sensorRange;
+    
+    
+    public void Execute(int idx)
+    {
+        int ti = targetIdx;
+        int oi = obsIdx + idx;
+        if (oi >= observerPoints.Length)
+        {
+            ti += oi / observerPoints.Length;
+            oi = oi % observerPoints.Length;
+        }
+        Vector3 point = observerPoints[oi];
+        float dist = Vector3.Distance(point, targetPoints[ti]);
+        if (dist <= 0.0001f) return;
+        if (dist >= sensorRange) return;
+        
+        
+        if (results[idx].distance == 0 || results[idx].distance >= dist)
+        {
+            observerPointsVisibilities[idx]=true;
+           
+        }
+
+    }
+}
