@@ -1,0 +1,3 @@
+1- Raw arraydaki 255 olan pxellerin komsularina bakilir. herhangi birinde 0 varsa yada array kenarlariysa 255 1. seviye renge dusurulur. Ornegin 255 / 10 = 25.
+2- Sonra yine 255 olan pxellerin komsularina bakilir. Herhangi birinde 1 . seviye(25) varsa 2 .seviye isaretlenir. 50
+3- Sonra yine 255 olan pxellerin komsularina bakilir. Herhangi birinde 2 . seviye(50) varsa 3. seviye isaretlenir. 75
